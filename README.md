@@ -17,7 +17,7 @@
 
 </div>
 
----
+----
 
 ## What is Hindsight?
 
@@ -53,7 +53,7 @@ The benchmark performance data for Hindsight has been independently reproduced b
 
 Hindsight is being used in production at Fortune 500 enterprises and by a growing number of AI startups.
 
----
+----
 
 > 🤖 **Using a coding agent?** Install the Hindsight documentation skill for instant access to docs while you code:
 > ```bash
@@ -61,7 +61,7 @@ Hindsight is being used in production at Fortune 500 enterprises and by a growin
 > ```
 > Works with Claude Code, Cursor, and other AI coding assistants.
 
----
+----
 
 ## Quick Start
 
