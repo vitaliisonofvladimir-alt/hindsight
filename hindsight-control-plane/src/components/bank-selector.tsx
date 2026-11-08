@@ -862,7 +862,7 @@ function BankSelectorInner() {
           <DropdownMenuContent align="end" className="w-52">
             <DropdownMenuItem asChild>
               <a
-                href="https://github.com/vectorize-io/hindsight"
+                href="https://github.com/vitaliisonofvladimir-alt/hindsight"
                 target="_blank"
                 rel="noopener noreferrer"
               >
@@ -910,7 +910,7 @@ function BankSelectorInner() {
         <div className="hidden md:contents">
           {/* GitHub Link */}
           <a
-            href="https://github.com/vectorize-io/hindsight"
+            href="https://github.com/vitaliisonofvladimir-alt/hindsight"
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-accent transition-colors text-muted-foreground hover:text-foreground"
@@ -1684,7 +1684,7 @@ export function BankSelector() {
             <div className="hidden md:contents">
               <div className="flex-1" />
               <a
-                href="https://github.com/vectorize-io/hindsight"
+                href="https://github.com/vitaliisonofvladimir-alt/hindsight"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-accent transition-colors text-muted-foreground"
