@@ -8,7 +8,6 @@ import {
   cachedGraph,
   fetchGraph,
   isFresh,
-  prefetchGraph,
   sameGraph,
   storeGraph,
 } from "@/lib/graph-cache";
@@ -66,19 +65,20 @@ import { ScatterChart, Plus, FileText } from "lucide-react";
 
 type FactType = "world" | "experience" | "observation";
 type ViewMode = "table" | "timeline" | "constellation";
-const DEFAULT_FETCH_LIMIT = 1000;
+// Keep table and timeline fetches bounded on phones; users can increase the limit.
+const DEFAULT_FETCH_LIMIT = 200;
 
-// Constellation, table or timeline: kept across tabs and visits, so someone who
-// works in the table doesn't land back on the constellation every time.
+// A previous visit may have saved the heavy constellation mode: fall back to
+// the lightweight table without requiring users to clear browser storage.
 const VIEW_MODE_KEY = "hindsight.memories.viewMode";
 function readViewMode(): ViewMode {
   try {
     const v = localStorage.getItem(VIEW_MODE_KEY);
-    if (v === "table" || v === "timeline" || v === "constellation") return v;
+    if (v === "table" || v === "timeline") return v;
   } catch {
     // No storage (server render, blocked): use the default.
   }
-  return "constellation";
+  return "table";
 }
 
 // Categorical palette for coloring observation scopes (exact tag sets) when
@@ -118,7 +118,6 @@ export function DataView({
   chunkId,
   compact = false,
   onExpandToggle,
-  prefetchTypes,
 }: DataViewProps) {
   const t = useTranslations("dataView");
   const tAddDoc = useTranslations("addDocument");
@@ -284,17 +283,6 @@ export function DataView({
       setData((prev: unknown) => (sameGraph(prev, graphData) ? prev : graphData));
       setAppliedFilters(applied);
       loadConsolidationStatus();
-      // The sibling tabs are one click away and each read is slow on a big
-      // bank: warm them now, one after another, behind the visible one.
-      if (prefetchTypes && !q && !tags) {
-        prefetchTypes.reduce(
-          (chain, ft) =>
-            chain.then(() =>
-              prefetchGraph({ bank_id: currentBank, type: ft, limit: DEFAULT_FETCH_LIMIT })
-            ),
-          Promise.resolve()
-        );
-      }
     } catch (error) {
       // Error toast is shown automatically by the API client interceptor
     } finally {
@@ -809,17 +797,6 @@ export function DataView({
                 )}
               </div>
               <div className="flex max-w-full items-center gap-2 overflow-x-auto bg-muted rounded-lg p-1">
-                <button
-                  onClick={() => chooseViewMode("constellation")}
-                  className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-1.5 ${
-                    viewMode === "constellation"
-                      ? "bg-background text-foreground shadow-sm"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  <ScatterChart className="w-4 h-4" />
-                  {t("constellation")}
-                </button>
                 <button
                   onClick={() => chooseViewMode("table")}
                   className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-1.5 ${
