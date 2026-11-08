@@ -1,32 +1,17 @@
 "use client";
 
-import { useEffect, useState, useMemo, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { client, type KnowledgeNode } from "@/lib/api";
 import { bankRoute } from "@/lib/bank-url";
-import { Constellation } from "./constellation";
-import type { GraphData, GraphNode, GraphLink } from "./graph-data";
 import { Button } from "@/components/ui/button";
-import { Network, FileText, Layers, FilePlus, ArrowRight } from "lucide-react";
+import { FileText, Layers, FilePlus, ArrowRight } from "lucide-react";
 import { Spinner } from "@/components/ui/spinner";
 import { formatRelativeTime, formatAbsoluteDateTime } from "@/lib/relative-time";
 import { MemoryStoreCard, MemoriesActivityChart, type BankStats } from "./bank-stats-view";
 import { TreeRow } from "./knowledge-base-view";
 import { useFeatures } from "@/lib/features-context";
-
-const FALLBACK_COLOR = "#0074d9";
-// The dashboard constellation is a glanceable memory map, not the full graph
-// explorer. Edge count grows super-linearly with nodes (≈1k nodes → ~67k edges,
-// ~22MB), so cap nodes here — the Memories view has the uncapped graph.
-const GRAPH_NODE_CAP = 200;
-// Cluster the memory constellation by fact type, matching the memories charts.
-const TYPE_COLORS: Record<string, string> = {
-  world: "#8b5cf6",
-  experience: "#ec4899",
-  observation: "#6366f1",
-  entity: "#0ea5e9",
-};
 
 // Documents have no standard name field (metadata is free-form and varies by
 // source), so recent-docs shows the document id.
@@ -61,8 +46,6 @@ export function HomeView({
   const { features } = useFeatures();
   const observationsEnabled = features?.observations ?? false;
   const [stats, setStats] = useState<BankStats | null>(null);
-  const [graph, setGraph] = useState<{ nodes?: unknown[]; edges?: unknown[] } | null>(null);
-  const [graphLoading, setGraphLoading] = useState(true);
   const [roots, setRoots] = useState<KnowledgeNode[]>([]);
   const [pages, setPages] = useState<KnowledgeNode[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -111,67 +94,6 @@ export function HomeView({
     };
   }, [bankId]);
 
-  // The memory constellation is heavy (edges scale super-linearly with nodes),
-  // so it loads on its own — never blocking the dashboard — with a modest node
-  // cap. The full memory graph lives in the Memories view.
-  useEffect(() => {
-    let cancelled = false;
-    setGraphLoading(true);
-    client
-      .getGraph({ bank_id: bankId, limit: GRAPH_NODE_CAP })
-      .then((g) => {
-        if (!cancelled) setGraph(g as { nodes?: unknown[]; edges?: unknown[] });
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (!cancelled) setGraphLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [bankId]);
-
-  // The dataplane graph is cytoscape-style ({ data: {...} } per node/edge); map
-  // it to the Constellation's flat GraphData, clustering by fact type.
-  const constellationData = useMemo<GraphData>(() => {
-    if (!graph) return { nodes: [], links: [] };
-    const nodes: GraphNode[] = (graph.nodes || []).map((raw) => {
-      const n =
-        (raw as { data?: Record<string, unknown> }).data ?? (raw as Record<string, unknown>);
-      return {
-        id: String(n.id),
-        label: (n.label as string) ?? undefined,
-        color: (n.color as string) ?? undefined,
-        group: (n.type as string) ?? undefined,
-      };
-    });
-    const links: GraphLink[] = (graph.edges || []).map((raw) => {
-      const e =
-        (raw as { data?: Record<string, unknown> }).data ?? (raw as Record<string, unknown>);
-      return {
-        source: String(e.source),
-        target: String(e.target),
-        weight: typeof e.weight === "number" ? (e.weight as number) : undefined,
-      };
-    });
-    return { nodes, links };
-  }, [graph]);
-
-  const nodeWeights = useMemo(() => {
-    const w = new Map<string, number>();
-    for (const l of constellationData.links) {
-      const v = typeof l.weight === "number" && l.weight > 0 ? l.weight : 1;
-      w.set(l.source, (w.get(l.source) || 0) + v);
-      w.set(l.target, (w.get(l.target) || 0) + v);
-    }
-    return w;
-  }, [constellationData]);
-  const maxWeight = useMemo(() => Math.max(1, ...nodeWeights.values()), [nodeWeights]);
-  const nodeSizeFn = useCallback(
-    (node: GraphNode) => 4 + Math.sqrt((nodeWeights.get(node.id) || 0) / maxWeight) * 9,
-    [nodeWeights, maxWeight]
-  );
-
   if (loading) {
     return (
       <div className="flex items-center justify-center py-32">
@@ -187,44 +109,9 @@ export function HomeView({
         {t("subtitle")} <span className="font-mono text-foreground">{bankId}</span>
       </p>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:h-[520px]">
-        {/* Memory constellation — fills the row height so it never leaves a gap. */}
-        <div className="lg:col-span-2 bg-card border border-border border-solid rounded-[16px] overflow-hidden flex flex-col lg:h-full">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
-            <div className="flex items-center gap-2">
-              <Network className="w-4 h-4 text-muted-foreground" />
-              <h2 className="text-sm font-semibold text-foreground">{t("constellationTitle")}</h2>
-            </div>
-            <button
-              onClick={() => onNavigate("data")}
-              className="text-xs text-primary hover:underline flex items-center gap-1"
-            >
-              {t("viewAll")} <ArrowRight className="w-3 h-3" />
-            </button>
-          </div>
-          {constellationData.nodes.length > 0 ? (
-            <Constellation
-              data={constellationData}
-              height={464}
-              onNodeClick={() => onNavigate("data")}
-              nodeSizeFn={nodeSizeFn}
-              clusterKeyFn={(node) => node.group ?? null}
-              clusterColorFn={(key) => TYPE_COLORS[key] || FALLBACK_COLOR}
-              clusterLabelFn={(key) => key}
-            />
-          ) : graphLoading ? (
-            <div className="flex flex-1 items-center justify-center">
-              <Spinner size="lg" variant="jump" />
-            </div>
-          ) : (
-            <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-              {t("constellationEmpty")}
-            </div>
-          )}
-        </div>
-
-        {/* Right column: knowledge pages + recent documents (share the row height). */}
-        <div className="flex flex-col gap-4 lg:h-full min-h-0">
+      <div className="grid grid-cols-1 gap-4">
+        {/* Lightweight knowledge pages and recent documents; no graph requests on Home. */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 min-h-0">
           <div className="bg-card border border-border border-solid rounded-[16px] flex-1 min-h-0 flex flex-col overflow-hidden">
             <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
               <h2 className="text-sm font-semibold text-foreground">{t("pagesTitle")}</h2>
@@ -318,7 +205,7 @@ export function HomeView({
         </div>
       </div>
 
-      {/* Memory stats demoted below the constellation + knowledge/docs. */}
+      {/* Memory stats stay below the lightweight knowledge/docs cards. */}
       {stats && (
         <div className="mt-4">
           <MemoryStoreCard stats={stats} observationsEnabled={observationsEnabled} />
