@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 import sys
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener, HTTPRedirectHandler
 
 BANK = "nvvai-autonomous-factory"
 TEMPLATE_BLOB_SHA1 = "8bd00f47ff2b2872108b1e9cb1dd12bcc339ce58"
@@ -21,6 +21,12 @@ TEMPLATE = Path(__file__).resolve().parent / "bank-template.json"
 BASE = "http://127.0.0.1:8888"
 MODEL_COUNT = 7
 DIRECTIVE_COUNT = 6
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+OPENER = build_opener(NoRedirect)
 
 def safe_request(method, path, token, data=None):
     # Nothing is sent to a remote host, shell, or log.
@@ -30,7 +36,7 @@ def safe_request(method, path, token, data=None):
         headers["Content-Type"] = "application/json"
     req = Request(BASE + path, data=data, headers=headers, method=method)
     try:
-        with urlopen(req, timeout=15) as response:
+        with OPENER.open(req, timeout=15) as response:
             raw = response.read(2_000_000)
             try:
                 payload = json.loads(raw)
@@ -50,7 +56,7 @@ def main():
                      help="Apply only after an authenticated dry run passes")
     opts = arg.parse_args()
     data = TEMPLATE.read_bytes()
-    blob_hash = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\\0" + data).hexdigest()
+    blob_hash = hashlib.sha1(b"blob " + str(len(data)).encode() + bytes([0]) + data).hexdigest()
     if blob_hash != TEMPLATE_BLOB_SHA1:
         raise SystemExit("BLOCKED: template Git blob SHA mismatch")
     manifest = json.loads(data)
