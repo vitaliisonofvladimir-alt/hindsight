@@ -7,6 +7,7 @@ Configuration via environment variables - see hindsight_api.config for all env v
 """
 
 import asyncio
+import base64
 import contextvars
 import logging
 import os
@@ -14,7 +15,7 @@ import threading
 import time
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypeVar, cast
 
@@ -65,7 +66,14 @@ from ..config import (
 )
 from .aiohttp_session import LoopLocal, LoopLocalSession, UpstreamHTTPError, per_phase_timeout, raise_for_status
 from .bank_attribution import reranker_bank_attribution_headers
-from .decision_model import overflowed_window, record_decision_call
+from .decision_model import (
+    JEV_IMAGE_FORMATS,
+    JEV_IMAGES_HEADER,
+    jev_accepts,
+    overflowed_window,
+    record_decision_call,
+)
+from .decision_rerank_interface import EvidenceImage
 from .llm_trace import RERANK_SCOPE, trace_model_call
 from .local_device import (
     LOCAL_MODEL_BUILD_LOCK,
@@ -302,8 +310,8 @@ class LocalSTCrossEncoder(CrossEncoderModel):
             trust_remote_code: Allow loading models with custom code (security risk).
                               Required for some models like jina-reranker-v2-base-multilingual.
                               Default: False (disabled for security)
-            fp16: Use FP16 (half precision) inference. Faster on CUDA,
-                  may be slower on CPU. Default: False (opt-in via env var).
+            fp16: Use FP16 (half precision) inference. Faster on CUDA; on CPU
+                  it halves memory but may not be faster. Default: False (opt-in via env var).
             bucket_batching: Sort pairs by token length before batching to reduce
                             padding waste. 36-54% speedup, quality-identical.
                             Default: False (opt-in via env var).
@@ -421,11 +429,17 @@ class LocalSTCrossEncoder(CrossEncoderModel):
 
             self._device_type = resolve_model_device_type(self._model)
 
-            # FP16 inference: convert model weights to half precision.
-            # Empirically validated: 27-36% faster on MPS, quality-identical (20/20 overlap).
-            if self.fp16 and self._device_type != "cpu":
+            # FP16 inference: convert model weights to half precision. On CUDA it is
+            # faster. It used to be skipped on CPU because it is not faster there, but
+            # it still halves the weights' RAM, and #6453 measured identical top-10
+            # rankings for bge-reranker-v2-m3, so the opt-in now applies on CPU too.
+            # The smoke test below catches a CPU that cannot run it.
+            if self.fp16:
                 self._model.model.half()
-                logger.info("Reranker: FP16 inference enabled")
+                if self._device_type == "cpu":
+                    logger.info("Reranker: FP16 inference enabled on CPU (halves memory, may not be faster)")
+                else:
+                    logger.info("Reranker: FP16 inference enabled")
 
             # Smoke-test the fully configured model (after any FP16 conversion). NaN logits
             # are sanitized to 0.0 downstream, so startup is the last point at which a model
@@ -676,7 +690,7 @@ class RemoteTEICrossEncoder(CrossEncoderModel):
             self._model_id = info.get("model_id", "unknown")
             logger.info(f"Reranker: TEI provider initialized (model: {self._model_id})")
         except (aiohttp.ClientError, UpstreamHTTPError, TimeoutError) as e:
-            raise RuntimeError(f"Failed to connect to TEI server at {self.base_url}: {e}")
+            raise RuntimeError(f"Failed to connect to TEI server at {self.base_url}: {e}") from e
 
     async def _rerank_query_group(
         self,
@@ -700,7 +714,7 @@ class RemoteTEICrossEncoder(CrossEncoderModel):
             # TEI returns results sorted by score descending, with original index
             return [(result["index"], result["score"]) for result in results]
         except (aiohttp.ClientError, UpstreamHTTPError, TimeoutError) as e:
-            raise RuntimeError(f"TEI rerank request failed: {e}")
+            raise RuntimeError(f"TEI rerank request failed: {e}") from e
 
     async def _predict_async(self, pairs: list[tuple[str, str]]) -> list[float]:
         """Async implementation of predict that runs requests in parallel with backpressure."""
@@ -1309,6 +1323,7 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
         prune_candidates: bool = DEFAULT_RERANKER_TYPESAFE_PRUNE_CANDIDATES,
         shortlist: int | None = None,
         min_keep: int | None = None,
+        vision: bool = False,
     ):
         if shortlist is not None:
             self.SHORTLIST = shortlist
@@ -1320,6 +1335,8 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
         self.base_url = (base_url or DEFAULT_RERANKER_TYPESAFE_BASE_URL).rstrip("/")
         self.timeout = timeout
         self.prunes_candidates = bool(prune_candidates)
+        # Whether the sufficiency question is shown the evidence's pictures (HINDSIGHT_API_DECISION_MODEL_VISION).
+        self.vision = vision
         # CrossLoopSemaphore, not asyncio.Semaphore: one encoder instance is built at
         # startup and reached from every loop in the process (worker threads run their
         # own via asyncio.run), and an asyncio.Semaphore binds to whichever loop first
@@ -1343,7 +1360,7 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
             f"(prune_candidates={self.prunes_candidates})"
         )
 
-    async def _ask(self, body: dict, scope: str) -> dict:
+    async def _ask(self, body: dict, scope: str, headers: dict[str, str] | None = None) -> dict:
         """One System One request, traced under ``scope`` like any LLM call."""
         started = time.monotonic()
         result: dict | None = None
@@ -1352,7 +1369,7 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
             async with self._semaphore:
                 async with self._session.get().post(
                     f"{self.base_url}{self.SYSTEMONE_PATH}",
-                    headers=reranker_bank_attribution_headers(),
+                    headers={**reranker_bank_attribution_headers(), **(headers or {})},
                     json=body,
                 ) as response:
                     await raise_for_status(response)
@@ -1367,7 +1384,8 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
                 provider=self.provider_name,
                 model=self.model,
                 scope=scope,
-                request=body,
+                # The trace keeps which pictures went, not their bytes.
+                request={**body, "assets": dict.fromkeys(body["assets"], "<image>")} if "assets" in body else body,
                 response=result if isinstance(result, dict) else None,
                 input_tokens=(usage.get("input_tokens") or 0) if isinstance(usage, dict) else 0,
                 started=started,
@@ -1506,13 +1524,30 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
         "The evidence fully answers the question",
     ]
 
-    async def evidence_is_sufficient(self, query: str, evidence: str) -> bool:
+    async def evidence_is_sufficient(
+        self, query: str, evidence: str, *, pictures: Sequence[EvidenceImage] = ()
+    ) -> bool:
         """Whether ``evidence`` already answers ``query``: one Score question.
 
         Used by a decision-orchestrated reflect to skip the LLM turns that would otherwise decide to keep
         searching. A Score, not a yes/no Choice, for the reason the cut uses one: the
         levels are ordered, and "partly" must not be rounded up to "yes".
+
+        ``pictures`` (the knowledge-bank pictures the evidence names by label) are shown too when
+        ``vision`` is on, as image assets each referenced after its label; the ones Jev would refuse
+        are left out.
         """
+        shown = [p for p in pictures if jev_accepts(p.media_type, p.data)] if self.vision else []
+        references = {f"[[picture-{i + 1}]]": picture for i, picture in enumerate(shown)}
+        pictures_text = "".join(f"\n{p.label}: {ref}" for ref, p in references.items())
+        assets = {
+            ref: {
+                "type": "image",
+                "format": JEV_IMAGE_FORMATS[p.media_type],
+                "data_base64": base64.b64encode(p.data).decode(),
+            }
+            for ref, p in references.items()
+        }
         overhead = (
             count_tokens(_SUFFICIENCY_INSTRUCTIONS) + sum(count_tokens(level) for level in self.SUFFICIENCY_LEVELS) + 50
         )
@@ -1520,12 +1555,14 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
         policy = self.retry_policy or RetryPolicy()
 
         async def ask(question_budget: int) -> dict:
-            budget = max(100, question_budget - overhead - count_tokens(prefix))
+            # The pictures' own tokens are Jev's to count: a request it finds too long is rebuilt smaller.
+            budget = max(100, question_budget - overhead - count_tokens(prefix) - count_tokens(pictures_text))
             # ponytail: keeps the head of the evidence; the agent's own results come
             # first (pages, then observations, then facts), so the tail is raw facts.
             fitted = truncate_to_tokens(evidence, budget).text if count_tokens(evidence) > budget else evidence
             body = {
-                "state": f"{prefix}{fitted}",
+                "state": f"{prefix}{fitted}" + (f"\n\nPictures:{pictures_text}" if assets else ""),
+                **({"assets": assets} if assets else {}),
                 "model": self.model,
                 "questions": {
                     "sufficient": {
@@ -1538,7 +1575,7 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
             # Retried as the page-impact question is: a rate limit read as "not enough" bought
             # the agent turns the decision model exists to save.
             return await acall_with_retry(
-                lambda: self._ask(body, "decision_evidence_sufficiency"),
+                lambda: self._ask(body, "decision_evidence_sufficiency", JEV_IMAGES_HEADER if assets else None),
                 policy=policy,
                 budget=policy.new_budget(),
                 provider=self.provider_name,
@@ -1560,7 +1597,7 @@ class TypeSafeCrossEncoder(CrossEncoderModel):
     async def could_change_page(self, topic: str, page: str, memory: str) -> bool:
         """Whether ``memory`` could change a page about ``topic`` that reads ``page``: one Choice.
 
-        Gates a delta knowledge-page refresh: a memory answered "no" is never shown to
+        Gates a delta page refresh: a memory answered "no" is never shown to
         the LLM. Worded so a doubt is a "yes", because a wrong "no" is silent and
         permanent (the refresh moves past the memory) while a wrong "yes" costs one
         LLM call, which is what every refresh pays without the gate.

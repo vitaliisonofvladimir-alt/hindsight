@@ -27,8 +27,8 @@ signal to re-run, not proof of a regression.
 ## What it evaluates
 
 One test file per operation, `evals/<operation>/test_<operation>.py`: `retain`,
-`recall`, `consolidation`, `reflect`, `refresh-pages` (and `misc/` for the
-coding-agents metric). Run one operation with `uv run pytest evals/recall`.
+`recall`, `consolidation`, `reflect`, `refresh-pages` and `misc/` for the coding-agents metric.
+Knowledge-bank benchmarks live in AMB (see Benchmarks below). Run one operation with `uv run pytest evals/recall`.
 
 **Every case has a category**, and its test id is `<category>/<case id>`
 (`test_retain[temporal/no-event-date]`). That is the syntax:
@@ -85,12 +85,12 @@ stays out of the category counts.
 | reflect | pages | 2 | the bank holds a page about the question, and the answer comes from it |
 | refresh_pages | precision | 3 | a page built across waves keeps the asked attribute apart from its near-misses |
 | refresh_pages | update | 4 | a later wave changes the answer: a newer owner, a departed on-call, a renamed service, a corrected figure |
-| refresh_pages | aggregation | 4 | a count grows across waves; a list gains and loses members; a new risk joins the list; a table grows over four deltas |
+| refresh_pages | aggregation | 5 | a count grows across waves; a list gains and loses members; a new risk joins the list; a table grows over four deltas; four new sections chained into the middle of a page |
 | refresh_pages | no_overreach | 2 | a year the bank does not cover; a rule true in one region only |
 | refresh_pages | stability | 3 | a wave with nothing for the page leaves it intact; no page collapses across waves; a history re-recorded every wave is not re-added |
 | refresh_pages | consistency | 2 | a changed value changes everywhere the page restates it (English, Chinese) |
 
-The knowledge-page and reflect evals share one corpus and grade twice per question: **correct** (meets
+The page and reflect evals share one corpus and grade twice per question: **correct** (meets
 its criteria — can fail on an incomplete answer) and **trap** (asserts the
 specific baited falsehood — the one that matters). The trap is asserted first.
 The retain evals bring their own inputs, because they grade ingestion rather than
@@ -557,7 +557,7 @@ reporter's); `HINDSIGHT_EVAL_CONSISTENCY_REPEATS` (default 1) repeats each on
 fresh pages, which is how to read a rate.
 
 **Benchmark: refresh cost** (`test_refresh_pages_benchmark_cost`). Not a quality grade: a baseline of what a
-knowledge-page refresh spends. Every LLM call the refresh makes is read back from
+page refresh spends. Every LLM call the refresh makes is read back from
 `/llm-requests` — input, cached and output tokens, and the prompt — for a full
 rebuild and for a delta after a small wave of new facts. Behind it: on real
 project banks a refresh sent 30–90k-token synthesis prompts, because a tool's
@@ -676,7 +676,10 @@ in [AMB](https://github.com/vectorize-io/agent-memory-benchmark), which owns the
 datasets, prompts, judge and scoring, and publishes to
 [agentmemorybenchmark.ai](https://agentmemorybenchmark.ai). None of that is
 duplicated here — a second copy of LoComo is how two copies drift until neither
-number means anything. This package only points AMB's `hindsight-http` provider
+number means anything. The knowledge-bank retrieval benchmarks are there too:
+ViDoRe V3 (PDF and markdown), MIRACL-Vision, text-to-video (MSR-VTT, DiDeMo,
+YouCook2), BrowseComp-Plus and ATM-Bench, in AMB's Knowledge section, each
+scored with its leaderboard's own NDCG@10 or Recall@10. This package only points AMB's `hindsight-http` provider
 at a target:
 
 ```bash
@@ -761,7 +764,7 @@ Each assertion prints the bank id, the page id (or the reflect queries and
 whether the gold evidence arrived), and what the page or answer actually reads.
 The bank is left in place, so it can be opened in the control plane.
 
-For a knowledge page that goes wrong, two tools, both through the public API:
+For a page that goes wrong, two tools, both through the public API:
 
 ```bash
 # 1. Where does it go wrong? Builds wave 1, then dry-runs the second refresh N
